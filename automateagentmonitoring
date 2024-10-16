@@ -1,36 +1,53 @@
 # Define variables
 $serviceName = 'Automate 2024 Agent'
-$timeFrame = (Get-Date).AddMinutes(-5)  # Adjust the time frame as needed
-#$timeFrame = (Get-Date).AddDays(-5)  # Adjust the time frame as needed
+$agentName = 'AUTOBOT'
+$recordIDFile = 'C:\Scripts\LastProcessedEventRecordID.txt'  # File to store the last processed EventRecordID
 
-# Get events from the Application log
+# Check if the record ID file exists; if not, create it with a default value
+if (-not (Test-Path -Path $recordIDFile)) {
+    New-Item -Path $recordIDFile -ItemType File -Value '0' | Out-Null
+}
+
+# Read the last processed EventRecordID
+$lastProcessedID = Get-Content -Path $recordIDFile | Select-Object -First 1
+$lastProcessedID = [long]$lastProcessedID  # Ensure it's treated as a number
+
+# Get events from the Application log with EventRecordID greater than the last processed ID
 $events = Get-WinEvent -FilterHashtable @{
     LogName = 'Application';
     ProviderName = 'Automate 2024 Execution Server';
     Id = 0;
-    StartTime = $timeFrame
-}
+    # No need for StartTime since we're using EventRecordID
+} | Where-Object { $_.RecordId -gt $lastProcessedID }
 
 # Initialize a flag to track if the event is found
 $eventFound = $false
+$newLastProcessedID = $lastProcessedID  # Initialize new last processed ID
 
 # Loop through the events
 foreach ($event in $events) {
     $message = $event.Message
-    if ($message -like "*the agent 'AUTOBOT' is not connected*") {
+    # Update the new last processed ID
+    if ($event.RecordId -gt $newLastProcessedID) {
+        $newLastProcessedID = $event.RecordId
+    }
+    if ($message -like "*the agent '$agentName' is not connected*") {
         # Event found, restart the service
         try {
             Restart-Service -Name $serviceName -Force -ErrorAction Stop
-            Write-Output "Service '$serviceName' restarted due to agent 'AUTOBOT' disconnection."
+            Write-Output "Service '$serviceName' restarted due to agent '$agentName' disconnection."
         } catch {
             Write-Error "Failed to restart service '$serviceName': $_"
         }
         $eventFound = $true
-        # Write-Output $message #Audit Line
+        # Write-Output $message # Audit Line
         break  # Exit the loop after handling the event        
     }
 }
 
+# Update the last processed EventRecordID
+Set-Content -Path $recordIDFile -Value $newLastProcessedID
+
 if (-not $eventFound) {
-    Write-Output "No disconnection event found for agent 'AUTOBOT' in the last 5 minutes."
+    Write-Output "No new disconnection event found for agent '$agentName'."
 }
