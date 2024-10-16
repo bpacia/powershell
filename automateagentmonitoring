@@ -1,7 +1,8 @@
 # Define variables
 $serviceName = 'Automate 2024 Agent'
 $agentName = 'AUTOBOT'
-$recordIDFile = 'C:\Scripts\LastProcessedEventRecordID.txt'  # File to store the last processed EventRecordID
+$scriptDirectory = 'F:\automate\script'  # Directory where the script and record ID file are located
+$recordIDFile = Join-Path -Path $scriptDirectory -ChildPath 'LastProcessedEventRecordID.txt'
 
 # Check if the record ID file exists; if not, create it with a default value
 if (-not (Test-Path -Path $recordIDFile)) {
@@ -17,7 +18,6 @@ $events = Get-WinEvent -FilterHashtable @{
     LogName = 'Application';
     ProviderName = 'Automate 2024 Execution Server';
     Id = 0;
-    # No need for StartTime since we're using EventRecordID
 } | Where-Object { $_.RecordId -gt $lastProcessedID }
 
 # Initialize a flag to track if the event is found
