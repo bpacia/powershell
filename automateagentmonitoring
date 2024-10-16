@@ -1,5 +1,5 @@
 # Define variables
-$serviceName = 'Automate 2024 Agent'
+$serviceName = 'AMAgent2024'
 $agentName = 'AUTOBOT'
 $scriptDirectory = 'F:\automate\script'  # Directory where the script and files are located
 $recordIDFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentlastprocessedeventrecordid.txt'
