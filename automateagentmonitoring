@@ -1,0 +1,36 @@
+# Define variables
+$serviceName = 'Automate 2024 Agent'
+$timeFrame = (Get-Date).AddMinutes(-5)  # Adjust the time frame as needed
+#$timeFrame = (Get-Date).AddDays(-5)  # Adjust the time frame as needed
+
+# Get events from the Application log
+$events = Get-WinEvent -FilterHashtable @{
+    LogName = 'Application';
+    ProviderName = 'Automate 2024 Execution Server';
+    Id = 0;
+    StartTime = $timeFrame
+}
+
+# Initialize a flag to track if the event is found
+$eventFound = $false
+
+# Loop through the events
+foreach ($event in $events) {
+    $message = $event.Message
+    if ($message -like "*the agent 'AUTOBOT' is not connected*") {
+        # Event found, restart the service
+        try {
+            Restart-Service -Name $serviceName -Force -ErrorAction Stop
+            Write-Output "Service '$serviceName' restarted due to agent 'AUTOBOT' disconnection."
+        } catch {
+            Write-Error "Failed to restart service '$serviceName': $_"
+        }
+        $eventFound = $true
+        # Write-Output $message #Audit Line
+        break  # Exit the loop after handling the event        
+    }
+}
+
+if (-not $eventFound) {
+    Write-Output "No disconnection event found for agent 'AUTOBOT' in the last 5 minutes."
+}
