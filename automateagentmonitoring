@@ -3,6 +3,7 @@ $serviceName = 'Automate 2024 Agent'
 $agentName = 'AUTOBOT'
 $scriptDirectory = 'F:\automate\script'  # Directory where the script and record ID file are located
 $recordIDFile = Join-Path -Path $scriptDirectory -ChildPath 'LastProcessedEventRecordID.txt'
+$logFile = Join-Path -Path $scriptDirectory -ChildPath 'AgentMonitor.log'
 
 # Check if the record ID file exists; if not, create it with a default value
 if (-not (Test-Path -Path $recordIDFile)) {
@@ -35,12 +36,15 @@ foreach ($event in $events) {
         # Event found, restart the service
         try {
             Restart-Service -Name $serviceName -Force -ErrorAction Stop
-            Write-Output "Service '$serviceName' restarted due to agent '$agentName' disconnection."
+            $logEntry = "$(Get-Date): Service '$serviceName' restarted due to agent '$agentName' disconnection. EventRecordID: $newLastProcessedID"
+            Write-Output $logEntry
+            Add-Content -Path $logFile -Value $logEntry
         } catch {
-            Write-Error "Failed to restart service '$serviceName': $_"
+            $errorMsg = "$(Get-Date): Failed to restart service '$serviceName': $_"
+            Write-Error $errorMsg
+            Add-Content -Path $logFile -Value $errorMsg
         }
         $eventFound = $true
-        # Write-Output $message # Audit Line
         break  # Exit the loop after handling the event        
     }
 }
@@ -49,5 +53,7 @@ foreach ($event in $events) {
 Set-Content -Path $recordIDFile -Value $newLastProcessedID
 
 if (-not $eventFound) {
-    Write-Output "No new disconnection event found for agent '$agentName'."
+    $logEntry = "$(Get-Date): No new disconnection event found for agent '$agentName'. Last EventRecordID checked: $newLastProcessedID"
+    Write-Output $logEntry
+    Add-Content -Path $logFile -Value $logEntry
 }
