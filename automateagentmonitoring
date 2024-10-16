@@ -1,18 +1,36 @@
 # Define variables
 $serviceName = 'Automate 2024 Agent'
 $agentName = 'AUTOBOT'
-$scriptDirectory = 'F:\automate\script'  # Directory where the script and record ID file are located
-$recordIDFile = Join-Path -Path $scriptDirectory -ChildPath 'LastProcessedEventRecordID.txt'
-$logFile = Join-Path -Path $scriptDirectory -ChildPath 'AgentMonitor.log'
+$scriptDirectory = 'F:\automate\script'  # Directory where the script and files are located
+$recordIDFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentlastprocessedeventrecordid.txt'
+$logFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentmonitor.log'
+$restartTimeFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentlastrestarttime.txt'
+$cooldownMinutes = 5  # Minimum interval between restarts in minutes
 
 # Check if the record ID file exists; if not, create it with a default value
 if (-not (Test-Path -Path $recordIDFile)) {
     New-Item -Path $recordIDFile -ItemType File -Value '0' | Out-Null
 }
 
+# Check if the restart time file exists; if not, create it with a default value
+if (-not (Test-Path -Path $restartTimeFile)) {
+    New-Item -Path $restartTimeFile -ItemType File -Value '01/01/2000 00:00:00' | Out-Null
+}
+
 # Read the last processed EventRecordID
 $lastProcessedID = Get-Content -Path $recordIDFile | Select-Object -First 1
 $lastProcessedID = [long]$lastProcessedID  # Ensure it's treated as a number
+
+# Read the last restart time
+$lastRestartTimeString = Get-Content -Path $restartTimeFile | Select-Object -First 1
+$lastRestartTime = [datetime]$lastRestartTimeString
+
+# Get current time
+$currentTime = Get-Date
+
+# Calculate time since last restart
+$timeSinceLastRestart = $currentTime - $lastRestartTime
+$minutesSinceLastRestart = $timeSinceLastRestart.TotalMinutes
 
 # Get events from the Application log with EventRecordID greater than the last processed ID
 $events = Get-WinEvent -FilterHashtable @{
@@ -21,8 +39,9 @@ $events = Get-WinEvent -FilterHashtable @{
     Id = 0;
 } | Where-Object { $_.RecordId -gt $lastProcessedID }
 
-# Initialize a flag to track if the event is found
+# Initialize flags
 $eventFound = $false
+$restartNeeded = $false
 $newLastProcessedID = $lastProcessedID  # Initialize new last processed ID
 
 # Loop through the events
@@ -33,26 +52,42 @@ foreach ($event in $events) {
         $newLastProcessedID = $event.RecordId
     }
     if ($message -like "*the agent '$agentName' is not connected*") {
-        # Event found, restart the service
-        try {
-            Restart-Service -Name $serviceName -Force -ErrorAction Stop
-            $logEntry = "$(Get-Date): Service '$serviceName' restarted due to agent '$agentName' disconnection. EventRecordID: $newLastProcessedID"
+        # Event found
+        $eventFound = $true
+        # Check if cool-down period has passed
+        if ($minutesSinceLastRestart -ge $cooldownMinutes) {
+            $restartNeeded = $true
+            break  # Exit the loop after determining that a restart is needed
+        } else {
+            # Cool-down period not yet passed
+            $logEntry = "$(Get-Date): Service restart skipped due to cool-down period. Last restart was $([int]$minutesSinceLastRestart) minutes ago."
             Write-Output $logEntry
             Add-Content -Path $logFile -Value $logEntry
-        } catch {
-            $errorMsg = "$(Get-Date): Failed to restart service '$serviceName': $_"
-            Write-Error $errorMsg
-            Add-Content -Path $logFile -Value $errorMsg
+            $restartNeeded = $false
+            break  # Exit the loop since we've handled the event
         }
-        $eventFound = $true
-        break  # Exit the loop after handling the event        
     }
 }
 
 # Update the last processed EventRecordID
 Set-Content -Path $recordIDFile -Value $newLastProcessedID
 
-if (-not $eventFound) {
+if ($restartNeeded) {
+    # Restart the service
+    try {
+        Restart-Service -Name $serviceName -Force -ErrorAction Stop
+        # Update the last restart time
+        $currentTimeString = $currentTime.ToString("G")
+        Set-Content -Path $restartTimeFile -Value $currentTimeString
+        $logEntry = "$(Get-Date): Service '$serviceName' restarted due to agent '$agentName' disconnection. EventRecordID: $newLastProcessedID"
+        Write-Output $logEntry
+        Add-Content -Path $logFile -Value $logEntry
+    } catch {
+        $errorMsg = "$(Get-Date): Failed to restart service '$serviceName': $_"
+        Write-Error $errorMsg
+        Add-Content -Path $logFile -Value $errorMsg
+    }
+} elseif (-not $eventFound) {
     $logEntry = "$(Get-Date): No new disconnection event found for agent '$agentName'. Last EventRecordID checked: $newLastProcessedID"
     Write-Output $logEntry
     Add-Content -Path $logFile -Value $logEntry
