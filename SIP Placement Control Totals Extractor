@@ -1,0 +1,79 @@
+# Define folder paths
+
+# Test Folder Paths
+#$folderPath = "\\faprod\gdrive\fairview\corpbaddebt\stage"
+#$outputFolder = "\\faprod\gdrive\fairview\corpbaddebt\stage\controltotals" 
+# Live Folder Paths
+$folderPath = "\\faprod\fdrive\fairview\corpbaddebt\stage"
+$outputFolder = "\\faprod\fdrive\fairview\corpbaddebt\stage\controltotals"
+
+# Define output file name with date
+$outputFileName = "outplacecontroltotals$(Get-Date -Format 'MMddyyyy').txt"
+$outputFilePath = Join-Path -Path $outputFolder -ChildPath $outputFileName
+
+# Define column index (adjust for 0-based index, e.g., 52 for column 53)
+$columnIndex = 52
+
+# Initialize the output file (create an empty file)
+Set-Content -Path $outputFilePath -Value ""
+
+# Get all files in the folder with "outPlace" in the name
+$files = Get-ChildItem -Path $folderPath -Filter "*outPlace*.txt"
+
+# Check if any files were found
+if ($files.Count -eq 0) {
+    Add-Content -Path $outputFilePath -Value "No files found with 'outPlace' in the filename in the specified folder."
+    Write-Host "No files found with 'outPlace' in the filename in the specified folder."
+    exit
+}
+
+# Process each file
+foreach ($file in $files) {
+    # Extract filename and modify it
+    $fileName = $file.Name
+    $extension = $file.Extension
+    $baseName = $fileName.Substring(0, $fileName.Length - $extension.Length) # Remove extension temporarily
+
+    # Check if "_OutPlace_" exists
+    if ($baseName -like "*_OutPlace_*") {
+        # Use regex to remove "_OutPlace_YYYYMMDD"
+        $baseName = $baseName -replace "_OutPlace_\d{8}$", ""
+    }
+
+    # Reattach the file extension
+    $modifiedFileName = $baseName + $extension
+
+    # Initialize counters for the current file
+    $recordCount = 0
+    $sumAmount = 0.0
+
+    # Read and process the file
+    try {
+        Get-Content -Path $file.FullName | ForEach-Object {
+            # Split the line into columns using pipe as delimiter
+            $columns = $_ -split "\|"
+
+            # Ensure the line has the required column
+            if ($columns.Length -gt $columnIndex) {
+                $recordCount++
+
+                # Parse the amount from column 53 and add to the sum
+                $amount = [double]$columns[$columnIndex]
+                $sumAmount += $amount
+            }
+        }
+
+        # Write results for the current file to the output file
+        Add-Content -Path $outputFilePath -Value "Filename: $modifiedFileName"
+        Add-Content -Path $outputFilePath -Value "Record Count: $recordCount"
+        Add-Content -Path $outputFilePath -Value "Amount Total: $sumAmount"
+        Add-Content -Path $outputFilePath -Value "" # Blank line for readability
+
+    } catch {
+        Add-Content -Path $outputFilePath -Value "An error occurred while processing file: $fileName"
+        Add-Content -Path $outputFilePath -Value $_
+    }
+}
+
+# Notify the user where the output file is located
+Write-Host "Results have been saved to: $outputFilePath"
