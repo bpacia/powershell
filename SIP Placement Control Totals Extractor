@@ -1,9 +1,10 @@
 # Define folder paths
 
-# Test Folder Paths
+# -- Test Folder Paths --
 #$folderPath = "\\faprod\gdrive\fairview\corpbaddebt\stage"
-#$outputFolder = "\\faprod\gdrive\fairview\corpbaddebt\stage\controltotals" 
-# Live Folder Paths
+#$outputFolder = "\\faprod\gdrive\fairview\corpbaddebt\stage\controltotals"
+
+# -- Live Folder Paths --
 $folderPath = "\\faprod\fdrive\fairview\corpbaddebt\stage"
 $outputFolder = "\\faprod\fdrive\fairview\corpbaddebt\stage\controltotals"
 
@@ -63,10 +64,13 @@ foreach ($file in $files) {
             }
         }
 
+        # Format the sumAmount to two decimals for output
+        $formattedAmount = "{0:N2}" -f $sumAmount
+
         # Write results for the current file to the output file
         Add-Content -Path $outputFilePath -Value "Filename: $modifiedFileName"
         Add-Content -Path $outputFilePath -Value "Record Count: $recordCount"
-        Add-Content -Path $outputFilePath -Value "Amount Total: $sumAmount"
+        Add-Content -Path $outputFilePath -Value "Amount Total: $formattedAmount"
         Add-Content -Path $outputFilePath -Value "" # Blank line for readability
 
     } catch {
