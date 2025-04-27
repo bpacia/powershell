@@ -1,0 +1,89 @@
+# PowerShell script to upload two files from a network location to an SFTP server using WinSCP with a 10-second delay between uploads
+
+# Configuration
+$winscpPath = "C:\Program Files (x86)\WinSCP\winscp.com"
+$scriptFile = "\\faprod\fdrive\neustar\tcpascrub\script\neustar_upload_script_$(Get-Date -Format 'MM-DD-YYYY')"  # Fortra Automate variable for script path
+$logFile = "\\faprod\edrive\archive\neustar\tcpascrub\$(Get-Date -Format 'MM-DD-YYYY')\neustar_upload_$(Get-Date -Format 'MM-DD-YYYY').log"  # Fortra Automate variable for log path
+$localFile = "\\faprod\fdrive\neustar\tcpascrub\stage\nsr_uscb_a_$(Get-Date).AddDays(-2).ToString('yyyyMMDD').csv.pgp"  # Network path (UNC) for main file
+$localCtlFile = "\\faprod\fdrive\neustar\tcpascrub\stage\nsr_uscb_a_$(Get-Date).AddDays(-2).ToString('yyyyMMDD').csv.ctl"  # Network path (UNC) for control file
+$remotePath = "/users/data/uscb/Input/"  # Remote SFTP directory
+$server = "download.targusinfo.com"
+$username = "%tv_ftp_username%"
+$password = "%tv_ftp_pw%"  # Hardcoded password
+$port = 22  # SFTP port
+$protocol = "sftp"
+
+# Verify network file accessibility
+if (-not (Test-Path $localFile)) {
+    Write-Host "Error: Network file $localFile is not accessible. Check path and permissions."
+    exit 1
+}
+if (-not (Test-Path $localCtlFile)) {
+    Write-Host "Error: Network file $localCtlFile is not accessible. Check path and permissions."
+    exit 1
+}
+
+# Create WinSCP script for main file
+$scriptFileMain = $scriptFile + "_main.txt"
+$winscpScriptMain = @"
+open $protocol://$username:$password@$server -port=$port
+put "$localFile" $remotePath
+exit
+"@
+
+# Create WinSCP script for control file
+$scriptFileCtl = $scriptFile + "_ctl.txt"
+$winscpScriptCtl = @"
+open $protocol://$username:$password@$server -port=$port
+put "$localCtlFile" $remotePath
+exit
+"@
+
+# Save WinSCP scripts to temporary files
+$winscpScriptMain | Out-File -FilePath $scriptFileMain -Encoding ASCII
+$winscpScriptCtl | Out-File -FilePath $scriptFileCtl -Encoding ASCII
+
+# Execute WinSCP for main file
+try {
+    Write-Host "Starting upload of $localFile..."
+    $process = Start-Process -FilePath $winscpPath -ArgumentList "/script=`"$scriptFileMain`" /log=`"$logFile`"" -Wait -PassThru -NoNewWindow
+    if ($process.ExitCode -eq 0) {
+        Write-Host "Main file uploaded successfully from $localFile to $remotePath."
+    } else {
+        Write-Host "WinSCP failed for main file with exit code $($process.ExitCode). Check $logFile for details."
+        exit 1
+    }
+}
+catch {
+    Write-Host "Error running WinSCP for main file: $_"
+    exit 1
+}
+
+# Wait 10 seconds
+Write-Host "Waiting 10 seconds before uploading control file..."
+Start-Sleep -Seconds 10
+
+# Execute WinSCP for control file
+try {
+    Write-Host "Starting upload of $localCtlFile..."
+    $process = Start-Process -FilePath $winscpPath -ArgumentList "/script=`"$scriptFileCtl`" /log=`"$logFile`"" -Wait -PassThru -NoNewWindow
+    if ($process.ExitCode -eq 0) {
+        Write-Host "Control file uploaded successfully from $localCtlFile to $remotePath."
+    } else {
+        Write-Host "WinSCP failed for control file with exit code $($process.ExitCode). Check $logFile for details."
+        exit 1
+    }
+}
+catch {
+    Write-Host "Error running WinSCP for control file: $_"
+    exit 1
+}
+finally {
+    # Clean up temporary script files
+    if (Test-Path $scriptFileMain) {
+        Remove-Item $scriptFileMain
+    }
+    if (Test-Path $scriptFileCtl) {
+        Remove-Item $scriptFileCtl
+    }
+}
