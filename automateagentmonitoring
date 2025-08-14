@@ -1,10 +1,10 @@
 # Define variables
 $serviceName = 'AMAgent2024'
 $agentName = 'AUTOBOT'
-$scriptDirectory = 'F:\automate\script'  # Directory where the script and files are located
-$recordIDFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentlastprocessedeventrecordid.txt'
+$scriptDirectory = 'F:\automate\script\automateagentmonitoring'  # Directory where the script and files are located
+$recordIDFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentlastprocessedeventrecordid.log'
 $logFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentmonitor.log'
-$restartTimeFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentlastrestarttime.txt'
+$restartTimeFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentlastrestarttime.log'
 $cooldownMinutes = 5  # Minimum interval between restarts in minutes
 
 # Check if the record ID file exists; if not, create it with a default value
