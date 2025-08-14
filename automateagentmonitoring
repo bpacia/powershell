@@ -1,3 +1,5 @@
+# Requires running as administrator
+
 # Define variables
 $serviceName = 'AMAgent2024'
 $agentName = 'AUTOBOT'
@@ -87,8 +89,8 @@ if ($restartNeeded) {
         Write-Error $errorMsg
         Add-Content -Path $logFile -Value $errorMsg
     }
-} elseif (-not $eventFound) {
-    $logEntry = "$(Get-Date): No new disconnection event found for agent '$agentName'. Last EventRecordID checked: $newLastProcessedID"
-    Write-Output $logEntry
-    Add-Content -Path $logFile -Value $logEntry
-}
+} #elseif (-not $eventFound) {
+  #  $logEntry = "$(Get-Date): No new disconnection event found for agent '$agentName'. Last EventRecordID checked: $newLastProcessedID"
+  #  Write-Output $logEntry
+  #  Add-Content -Path $logFile -Value $logEntry
+#}
