@@ -1,96 +1,189 @@
-# Requires running as administrator
+#Requires -Version 3.0
+<#
+  Purpose : Monitor Application log for Automate disconnect message and restart AMAgent2024.
+  OS      : Windows Server 2012 R2+
+  Author  : Peer-reviewed version
+#>
 
-# Define variables
-$serviceName = 'AMAgent2024'
-$agentName = 'AUTOBOT'
-$scriptDirectory = 'F:\automate\script\automateagentmonitoring'  # Directory where the script and files are located
-$recordIDFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentlastprocessedeventrecordid.log'
-$logFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentmonitor.log'
-$restartTimeFile = Join-Path -Path $scriptDirectory -ChildPath 'automateagentlastrestarttime.log'
-$cooldownMinutes = 5  # Minimum interval between restarts in minutes
+#region --- Config ---
+$serviceName        = 'AMAgent2024'
+$agentName          = 'AUTOBOT'
+$scriptDirectory    = 'F:\automate\script\automateagentmonitoring'
+$recordIDFile       = Join-Path $scriptDirectory 'automateagentlastprocessedeventrecordid.log'
+$logFile            = Join-Path $scriptDirectory 'automateagentmonitor.log'
+$restartTimeFile    = Join-Path $scriptDirectory 'automateagentlastrestarttime.log'
+$cooldownMinutes    = 5
 
-# Check if the record ID file exists; if not, create it with a default value
-if (-not (Test-Path -Path $recordIDFile)) {
-    New-Item -Path $recordIDFile -ItemType File -Value '0' | Out-Null
+$providerName       = 'Automate 2024 Execution Server'
+$eventId            = 0
+$expectedSubstring  = "the agent '$agentName' is not connected"
+$eventSource        = 'AutomateAgentAutoHeal'   # for Application log entries
+$waitTimeoutSec     = 60                        # wait for service Running
+#endregion
+
+#region --- Helpers ---
+function Write-Log {
+    param([string]$Message, [ValidateSet('Information','Warning','Error')][string]$Level='Information')
+    $timestamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $line = "$timestamp | $Level | $Message"
+    try {
+        if (-not (Test-Path $scriptDirectory)) { New-Item -ItemType Directory -Path $scriptDirectory -Force | Out-Null }
+        Add-Content -Path $logFile -Value $line -Encoding UTF8
+    } catch { }
+
+    try {
+        if (-not [System.Diagnostics.EventLog]::SourceExists($eventSource)) {
+            New-EventLog -LogName Application -Source $eventSource
+        }
+        Write-EventLog -LogName Application -Source $eventSource -EventId 1000 -EntryType $Level -Message $Message
+    } catch { }
 }
 
-# Check if the restart time file exists; if not, create it with a default value
-if (-not (Test-Path -Path $restartTimeFile)) {
-    New-Item -Path $restartTimeFile -ItemType File -Value '01/01/2000 00:00:00' | Out-Null
+function Ensure-Files {
+    if (-not (Test-Path $scriptDirectory)) { New-Item -ItemType Directory -Path $scriptDirectory -Force | Out-Null }
+    if (-not (Test-Path $recordIDFile))    { Set-Content -Path $recordIDFile -Value '0' -Encoding UTF8 }
+    if (-not (Test-Path $restartTimeFile)) { Set-Content -Path $restartTimeFile -Value '2000-01-01T00:00:00Z' -Encoding UTF8 }
 }
 
-# Read the last processed EventRecordID
-$lastProcessedID = Get-Content -Path $recordIDFile | Select-Object -First 1
-$lastProcessedID = [long]$lastProcessedID  # Ensure it's treated as a number
-
-# Read the last restart time
-$lastRestartTimeString = Get-Content -Path $restartTimeFile | Select-Object -First 1
-$lastRestartTime = [datetime]$lastRestartTimeString
-
-# Get current time
-$currentTime = Get-Date
-
-# Calculate time since last restart
-$timeSinceLastRestart = $currentTime - $lastRestartTime
-$minutesSinceLastRestart = $timeSinceLastRestart.TotalMinutes
-
-# Get events from the Application log with EventRecordID greater than the last processed ID
-$events = Get-WinEvent -FilterHashtable @{
-    LogName = 'Application';
-    ProviderName = 'Automate 2024 Execution Server';
-    Id = 0;
-} | Where-Object { $_.RecordId -gt $lastProcessedID }
-
-# Initialize flags
-$eventFound = $false
-$restartNeeded = $false
-$newLastProcessedID = $lastProcessedID  # Initialize new last processed ID
-
-# Loop through the events
-foreach ($event in $events) {
-    $message = $event.Message
-    # Update the new last processed ID
-    if ($event.RecordId -gt $newLastProcessedID) {
-        $newLastProcessedID = $event.RecordId
+function Get-LastProcessedId {
+    try {
+        $val = (Get-Content -Path $recordIDFile -Encoding UTF8 | Select-Object -First 1).Trim()
+        return [long]$val
+    } catch {
+        Write-Log "Invalid record ID file contents. Resetting to 0. ($($_.Exception.Message))" 'Warning'
+        Set-Content -Path $recordIDFile -Value '0' -Encoding UTF8
+        return 0L
     }
-    if ($message -like "*the agent '$agentName' is not connected*") {
-        # Event found
-        $eventFound = $true
-        # Check if cool-down period has passed
-        if ($minutesSinceLastRestart -ge $cooldownMinutes) {
-            $restartNeeded = $true
-            break  # Exit the loop after determining that a restart is needed
+}
+
+function Get-LastRestartTime {
+    try {
+        $val = (Get-Content -Path $restartTimeFile -Encoding UTF8 | Select-Object -First 1).Trim()
+        return [datetime]::Parse($val, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal)
+    } catch {
+        # Backward compatibility with old format
+        try { return [datetime]$val } catch { return [datetime]'2000-01-01T00:00:00Z' }
+    }
+}
+
+function Set-LastProcessedId([long]$id) {
+    Set-Content -Path $recordIDFile -Value ($id.ToString()) -Encoding UTF8
+}
+
+function Set-LastRestartTime([datetime]$dt) {
+    $iso = $dt.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    Set-Content -Path $restartTimeFile -Value $iso -Encoding UTF8
+}
+
+function Restart-AgentService {
+    param([string]$Name)
+    try {
+        $svc = Get-Service -Name $Name -ErrorAction Stop
+    } catch {
+        Write-Log "Service '$Name' not found: $($_.Exception.Message)" 'Error'
+        return $false
+    }
+
+    try {
+        Write-Log "Restarting service '$Name'..."
+        Restart-Service -Name $Name -Force -ErrorAction Stop
+        $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds($waitTimeoutSec))
+        $svc.Refresh()
+        if ($svc.Status -eq 'Running') {
+            Write-Log "Service '$Name' is Running after restart."
+            return $true
         } else {
-            # Cool-down period not yet passed
-            $logEntry = "$(Get-Date): Service restart skipped due to cool-down period. Last restart was $([int]$minutesSinceLastRestart) minutes ago."
-            Write-Output $logEntry
-            Add-Content -Path $logFile -Value $logEntry
-            $restartNeeded = $false
-            break  # Exit the loop since we've handled the event
+            Write-Log "Service '$Name' not Running within $waitTimeoutSec s; attempting Stop/Start..." 'Warning'
+            Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            Start-Service -Name $Name -ErrorAction Stop
+            $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds($waitTimeoutSec))
+            $svc.Refresh()
+            if ($svc.Status -eq 'Running') {
+                Write-Log "Service '$Name' started via Stop/Start."
+                return $true
+            }
+        }
+    } catch {
+        Write-Log "Service restart failed: $($_.Exception.Message)" 'Error'
+    }
+    return $false
+}
+#endregion
+
+#region --- Single-instance guard (prevents overlap from Task Scheduler) ---
+$mutexName = 'Global\AutoHeal_AMAgent2024_Mutex'
+$mtx = New-Object System.Threading.Mutex($false, $mutexName)
+if (-not $mtx.WaitOne(0)) {
+    Write-Log "Another instance is already running; exiting." 'Warning'
+    return
+}
+#endregion
+
+try {
+    Ensure-Files
+
+    $lastProcessedID     = Get-LastProcessedId
+    $lastRestartTime     = Get-LastRestartTime
+    $minutesSinceRestart = (New-TimeSpan -Start $lastRestartTime -End (Get-Date)).TotalMinutes
+
+    # Detect log clear/reset: if current max RecordId < stored, reset stored ID
+    $currentMax = (Get-WinEvent -LogName Application -MaxEvents 1 | Select-Object -ExpandProperty RecordId)
+    if ($currentMax -lt $lastProcessedID) {
+        Write-Log "Detected Application log reset (max RecordId=$currentMax < stored $lastProcessedID). Resetting stored ID to 0." 'Warning'
+        $lastProcessedID = 0
+        Set-LastProcessedId 0
+    }
+
+    # Server-side filter by Provider, EventID, and RecordId >
+    $xpath = "*[System[Provider[@Name='$providerName'] and (EventID=$eventId) and (EventRecordID > $lastProcessedID)]]"
+    $events = @()
+    try {
+        $events = Get-WinEvent -LogName Application -FilterXPath $xpath -ErrorAction Stop | Sort-Object RecordId
+    } catch {
+        # Fallback if XPath not supported for some reason on this box
+        $events = Get-WinEvent -FilterHashtable @{ LogName='Application'; ProviderName=$providerName; Id=$eventId } `
+                    | Where-Object { $_.RecordId -gt $lastProcessedID } | Sort-Object RecordId
+    }
+
+    $newLastProcessedID = $lastProcessedID
+    $restartNeeded = $false
+    $eventFound    = $false
+
+    foreach ($event in $events) {
+        if ($event.RecordId -gt $newLastProcessedID) { $newLastProcessedID = $event.RecordId }
+        $msg = $event.Message
+        if ($msg -ilike "*$expectedSubstring*") {
+            $eventFound = $true
+            if ($minutesSinceRestart -ge $cooldownMinutes) {
+                $restartNeeded = $true
+            } else {
+                Write-Log ("Service restart skipped (cool-down). Last restart {0:N0} minute(s) ago." -f $minutesSinceRestart)
+            }
+            break
         }
     }
-}
 
-# Update the last processed EventRecordID
-Set-Content -Path $recordIDFile -Value $newLastProcessedID
+    # Persist the highest RecordId we've examined (even if no restart)
+    if ($newLastProcessedID -ne $lastProcessedID) { Set-LastProcessedId $newLastProcessedID }
 
-if ($restartNeeded) {
-    # Restart the service
-    try {
-        Restart-Service -Name $serviceName -Force -ErrorAction Stop
-        # Update the last restart time
-        $currentTimeString = $currentTime.ToString("G")
-        Set-Content -Path $restartTimeFile -Value $currentTimeString
-        $logEntry = "$(Get-Date): Service '$serviceName' restarted due to agent '$agentName' disconnection. EventRecordID: $newLastProcessedID"
-        Write-Output $logEntry
-        Add-Content -Path $logFile -Value $logEntry
-    } catch {
-        $errorMsg = "$(Get-Date): Failed to restart service '$serviceName': $_"
-        Write-Error $errorMsg
-        Add-Content -Path $logFile -Value $errorMsg
+    if ($restartNeeded) {
+        if (Restart-AgentService -Name $serviceName) {
+            Set-LastRestartTime (Get-Date)
+            Write-Log "Service '$serviceName' restarted due to agent '$agentName' disconnection. EventRecordID: $newLastProcessedID"
+            exit 0
+        } else {
+            Write-Log "Failed to recover service '$serviceName'." 'Error'
+            exit 2
+        }
+    } elseif (-not $eventFound) {
+        Write-Log "No new disconnection event found for agent '$agentName'. Last EventRecordID checked: $newLastProcessedID"
+        exit 0
+    } else {
+        # Event found but skipped by cooldown
+        exit 0
     }
-} #elseif (-not $eventFound) {
-  #  $logEntry = "$(Get-Date): No new disconnection event found for agent '$agentName'. Last EventRecordID checked: $newLastProcessedID"
-  #  Write-Output $logEntry
-  #  Add-Content -Path $logFile -Value $logEntry
-#}
+}
+finally {
+    if ($mtx) { $mtx.ReleaseMutex() | Out-Null; $mtx.Dispose() }
+}
