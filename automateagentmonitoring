@@ -1,8 +1,7 @@
 #Requires -Version 3.0
 <#
   Purpose : Monitor Application log for Automate disconnect message and restart AMAgent2024.
-  OS      : Windows Server 2012 R2+
-  Author  : Peer-reviewed version
+  OS      : Windows Server 2012 R2+ (tested on 2019)
 #>
 
 #region --- Config ---
@@ -12,12 +11,12 @@ $scriptDirectory    = 'F:\automate\script\automateagentmonitoring'
 $recordIDFile       = Join-Path $scriptDirectory 'automateagentlastprocessedeventrecordid.log'
 $logFile            = Join-Path $scriptDirectory 'automateagentmonitor.log'
 $restartTimeFile    = Join-Path $scriptDirectory 'automateagentlastrestarttime.log'
-$cooldownMinutes    = 5
+$cooldownMinutes    = 60
 
 $providerName       = 'Automate 2024 Execution Server'
 $eventId            = 0
 $expectedSubstring  = "the agent '$agentName' is not connected"
-$eventSource        = 'AutomateAgentAutoHeal'   # for Application log entries
+$eventSource        = 'AutomateAgentAutoHeal'   # for Application event log writes
 $waitTimeoutSec     = 60                        # wait for service Running
 #endregion
 
@@ -61,7 +60,6 @@ function Get-LastRestartTime {
         $val = (Get-Content -Path $restartTimeFile -Encoding UTF8 | Select-Object -First 1).Trim()
         return [datetime]::Parse($val, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal)
     } catch {
-        # Backward compatibility with old format
         try { return [datetime]$val } catch { return [datetime]'2000-01-01T00:00:00Z' }
     }
 }
@@ -146,41 +144,50 @@ try {
                     | Where-Object { $_.RecordId -gt $lastProcessedID } | Sort-Object RecordId
     }
 
-    $newLastProcessedID = $lastProcessedID
-    $restartNeeded = $false
-    $eventFound    = $false
+    # --- New logic: examine all new events, remember the highest RecordId, and act only on NEWER-than-last-restart disconnects.
+    $latestEventRecordId = $lastProcessedID   # highest RecordId we saw this run
+    $latestMatch         = $null              # newest disconnect event after last restart
 
     foreach ($event in $events) {
-        if ($event.RecordId -gt $newLastProcessedID) { $newLastProcessedID = $event.RecordId }
+        if ($event.RecordId -gt $latestEventRecordId) { $latestEventRecordId = $event.RecordId }
+
+        # Only consider events that occurred after our last restart time
+        if ($event.TimeCreated -le $lastRestartTime) { continue }
+
         $msg = $event.Message
         if ($msg -ilike "*$expectedSubstring*") {
-            $eventFound = $true
-            if ($minutesSinceRestart -ge $cooldownMinutes) {
-                $restartNeeded = $true
-            } else {
-                Write-Log ("Service restart skipped (cool-down). Last restart {0:N0} minute(s) ago." -f $minutesSinceRestart)
-            }
-            break
+            # Keep the most recent matching disconnect; do not break—allow newer events to replace it
+            $latestMatch = $event
         }
     }
 
-    # Persist the highest RecordId we've examined (even if no restart)
-    if ($newLastProcessedID -ne $lastProcessedID) { Set-LastProcessedId $newLastProcessedID }
+    # Persist progress to the highest RecordId we examined this run (prevents leftover events from retriggering later)
+    if ($latestEventRecordId -gt $lastProcessedID) {
+        Set-LastProcessedId $latestEventRecordId
+    }
+
+    $restartNeeded = $false
+    if ($null -ne $latestMatch) {
+        if ($minutesSinceRestart -ge $cooldownMinutes) {
+            $restartNeeded = $true
+            Write-Log ("Matched disconnect at {0:u} (RecordId={1})" -f $latestMatch.TimeCreated, $latestMatch.RecordId)
+        } else {
+            Write-Log ("Disconnect event ignored due to cooldown. Age={0:N0} min; Cooldown={1} min" -f $minutesSinceRestart, $cooldownMinutes)
+        }
+    } else {
+        Write-Log "No NEW disconnect events since last restart. Highest RecordId observed: $latestEventRecordId"
+    }
 
     if ($restartNeeded) {
         if (Restart-AgentService -Name $serviceName) {
             Set-LastRestartTime (Get-Date)
-            Write-Log "Service '$serviceName' restarted due to agent '$agentName' disconnection. EventRecordID: $newLastProcessedID"
+            Write-Log "Service '$serviceName' restarted due to agent '$agentName' disconnection. EventRecordID: $($latestMatch.RecordId)"
             exit 0
         } else {
             Write-Log "Failed to recover service '$serviceName'." 'Error'
             exit 2
         }
-    } elseif (-not $eventFound) {
-        Write-Log "No new disconnection event found for agent '$agentName'. Last EventRecordID checked: $newLastProcessedID"
-        exit 0
     } else {
-        # Event found but skipped by cooldown
         exit 0
     }
 }
