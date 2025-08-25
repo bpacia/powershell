@@ -1,0 +1,113 @@
+param(
+    #[datetime]$TargetDate = (Get-Date),
+    [datetime]$TargetDate = (Get-Date -Date "2025-06-01"),
+    [string]$ExcelPath = "\\autobot\fdrive\ishd\IS File List.xlsx"  # <-- your file
+)
+
+#--- Helper: read Excel first sheet into objects (uses ImportExcel if present, else COM) ---
+function Read-ExcelRows {
+    param([string]$Path)
+
+    if (Get-Module -ListAvailable -Name ImportExcel) {
+        Import-Excel -Path $Path -Worksheet 1
+        return
+    }
+
+    # Fallback: COM (no extra modules needed)
+    $excel = New-Object -ComObject Excel.Application
+    $excel.Visible = $false
+    try {
+        $wb = $excel.Workbooks.Open($Path)
+        $ws = $wb.Worksheets.Item(1)
+        $rng = $ws.UsedRange
+        $values = $rng.Value2
+
+        if (-not $values) { return @() }
+        $rows = @()
+        $headers = @()
+        for ($c=1; $c -le $values.GetLength(1); $c++) {
+            $h = [string]$values[1,$c]
+            $headers += $h
+        }
+        for ($r=2; $r -le $values.GetLength(0); $r++) {
+            $obj = [ordered]@{}
+            for ($c=1; $c -le $headers.Count; $c++) {
+                $obj[$headers[$c-1]] = $values[$r,$c]
+            }
+            if ($obj.Values -ne $null -and ($obj.Values -join '') -ne '') {
+                $rows += [pscustomobject]$obj
+            }
+        }
+        $rows
+    }
+    finally {
+        if ($wb) { $wb.Close($false) | Out-Null }
+        $excel.Quit() | Out-Null
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
+    }
+}
+
+#--- Load rows from Excel ---
+if (-not (Test-Path $ExcelPath)) {
+    throw "Excel file not found: $ExcelPath"
+}
+$rows = Read-ExcelRows -Path $ExcelPath
+
+#--- Functions for matching ---
+function Normalize-Day([string]$s) {
+    if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+    $s = $s.Trim()
+    if ($s -match '^(all)$') { return 'All' }
+    return ( ($s.Substring(0,[Math]::Min(3,$s.Length))).Substring(0,1).ToUpper() +
+             ($s.Substring(1,[Math]::Min(2,[Math]::Max(0,$s.Length-1))).ToLower()) )
+}
+
+function Should-Include($row, [datetime]$date) {
+    $freq = ($row.ExpectedFrequency | Out-String).Trim().ToLower()
+    $day  = ($row.ExpectedDay       | Out-String).Trim()
+    $dayAbbrev = Normalize-Day $day
+    switch ($freq) {
+        'daily'   { return ($dayAbbrev -eq 'All' -or [string]::IsNullOrWhiteSpace($dayAbbrev)) }
+        'weekly'  { return $dayAbbrev -eq $date.ToString('ddd') }
+        'monthly' {
+            $n = 0
+            [void][int]::TryParse($day, [ref]$n)
+            return ($n -gt 0 -and $n -eq $date.Day)
+        }
+        default   { return $false }
+    }
+}
+
+#--- Render expected list ---
+$expected = foreach ($r in $rows) {
+    if (-not $r.FileName) { continue }
+
+    if (Should-Include $r $TargetDate) {
+        $fname = [string]$r.FileName
+        $fname = $fname -replace 'yyyyMMddhhmmss', $TargetDate.ToString('yyyyMMddHHmmss')
+        $fname = $fname -replace 'yyyyMMdd',        $TargetDate.ToString('yyyyMMdd')
+
+        $timeStr = ''
+        if ($r.ExpectedTime -ne $null -and $r.ExpectedTime -ne '') {
+            if ($r.ExpectedTime -is [double]) {
+                $timeStr = ([datetime]'1899-12-30').AddDays($r.ExpectedTime).ToString('HH:mm')
+            } else {
+                $timeStr = [string]$r.ExpectedTime
+            }
+        }
+
+        [pscustomobject]@{
+            Date      = $TargetDate.ToString('yyyy-MM-dd')
+            FileName  = $fname
+            DataClass = [string]$r.DataClass
+            FileType  = [string]$r.FileType
+            Time      = $timeStr
+        }
+    }
+}
+
+# Output to screen
+$expected | Sort-Object FileName | Format-Table -AutoSize
+
+# Optionally export checklist CSV
+$expected | Export-Csv -NoTypeInformation -Path "\\autobot\fdrive\ishd\ExpectedFiles_$($TargetDate.ToString('yyyyMMdd')).csv"
