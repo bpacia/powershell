@@ -3,13 +3,12 @@ param(
     [string]  $ExcelPath  = '\\autobot\fdrive\ishd\IS File List.xlsx'
 )
 
-# --- Read Excel (ImportExcel if available; else COM) ---
+# ---------------------- Read Excel ----------------------
 function Read-ExcelRows {
     param([string]$Path)
     if (Get-Module -ListAvailable -Name ImportExcel) {
         return Import-Excel -Path $Path -Worksheet 1
     }
-
     $excel = New-Object -ComObject Excel.Application
     $excel.Visible = $false
     try {
@@ -38,8 +37,9 @@ if (-not (Test-Path $ExcelPath)) { throw "Excel file not found: $ExcelPath" }
 $rows = Read-ExcelRows -Path $ExcelPath
 if (-not $rows) { Write-Warning "No rows found."; return }
 
-# --- Header resolution (forgiving) ---
+# ---------------------- Header resolution (forgiving) ----------------------
 function Normalize-Header([string]$s){ ($s -replace '[^a-z0-9]','').ToLower() }
+
 $first = $rows | Select-Object -First 1
 $normToActual=@{}
 foreach($p in $first.PSObject.Properties.Name){
@@ -55,6 +55,8 @@ $colFileName = ResolveCol @('FileName','File Name','ExpectedFile','Expected File
 $colFreq     = ResolveCol @('ExpectedFrequency','Frequency','Freq','Schedule','Cadence')
 $colDay      = ResolveCol @('ExpectedDay','Day','DoW','Weekday','Week Day')
 $colTime     = ResolveCol @('ExpectedTime','Time','ETA','DueTime','Due Time','TargetTime','Target Time')
+$colProcessed= ResolveCol @('ProcessedFlag','Processed Flag','Processed','Done','Checked')
+# Archive column just passes through (kept as-is)
 
 function Get-ColVal($row,[string]$colName){
     if([string]::IsNullOrWhiteSpace($colName)){ return $null }
@@ -63,30 +65,27 @@ function Get-ColVal($row,[string]$colName){
     $null
 }
 
-# --- Day token normalization ---
-# Treat these as "All": all, *, any, undetermined, unknown, tbd, na/n/a (any spacing/case).
+# ---------------------- Day token logic ----------------------
+# Treat as All for any frequency: all, *, any, undetermined, unknown, tbd, n/a, na
 function Normalize-DayToken([string]$s){
-    if([string]::IsNullOrWhiteSpace($s)){ return $null }      # blank stays null
+    if([string]::IsNullOrWhiteSpace($s)){ return $null }
     $t = $s.Trim()
     if ($t -match '^(all|\*|any|undetermined|unknown|tbd|n/?a)$') { return 'All' }
-
     switch (($t.Substring(0,[Math]::Min(3,$t.Length))).ToLower()){
         'mon'{'Mon'} 'tue'{'Tue'} 'wed'{'Wed'} 'thu'{'Thu'} 'fri'{'Fri'} 'sat'{'Sat'} 'sun'{'Sun'}
-        default { $t }  # e.g., numeric day for monthly
+        default { $t }
     }
 }
 
-# --- Include logic (now: 'All' applies to ANY frequency) ---
 function Should-Include($row,[datetime]$date){
     $freq = ([string](Get-ColVal $row $colFreq)).Trim().ToLower()
     $dayRaw = [string](Get-ColVal $row $colDay)
     $token  = Normalize-DayToken $dayRaw
 
-    # If token is 'All' (includes 'Undetermined', 'TBD', etc.), include regardless of frequency
     if ($token -eq 'All') { return $true }
 
     switch($freq){
-        'daily'   { return [string]::IsNullOrWhiteSpace($token) }                # blank/empty day → include
+        'daily'   { return [string]::IsNullOrWhiteSpace($token) }
         'weekly'  { return $token -eq $date.ToString('ddd') }
         'monthly' {
             $n=0
@@ -97,30 +96,96 @@ function Should-Include($row,[datetime]$date){
     }
 }
 
-# --- Time formatting (keeps original header name) ---
 function Format-Time($val){
     if ($null -eq $val -or $val -eq '') { return '' }
     if ($val -is [double]) { return ([datetime]'1899-12-30').AddDays($val).ToString('HH:mm') }
     try { (Get-Date -Date $val).ToString('HH:mm') } catch { [string]$val }
 }
 
-# --- Build expected list (Date + all original headers; time normalized in-place; no ResolvedFileName) ---
+# ---------------------- Build expected list ----------------------
 $expected = foreach($r in $rows){
     if(-not (Get-ColVal $r $colFileName)){ continue }
     if(Should-Include $r $TargetDate){
         $out=[ordered]@{ Date = $TargetDate.ToString('yyyy-MM-dd') }
+
         foreach($p in $r.PSObject.Properties){
-            if ($p.Name -eq 'ResolvedFileName') { continue }  # never include
-            if ($colTime -and $p.Name -eq $colTime) {
+            if ($p.Name -eq 'ResolvedFileName') { continue }         # never include
+            elseif ($colTime -and $p.Name -eq $colTime) {
+                # replace raw time with formatted value, preserving original header name
                 $out[$p.Name] = Format-Time (Get-ColVal $r $colTime)
-            } else {
+            }
+            elseif ($colProcessed -and $p.Name -eq $colProcessed) {
+                # force blank for manual checklist use
+                $out[$p.Name] = ''
+            }
+            else {
                 $out[$p.Name] = $p.Value
             }
         }
+
+        # If the sheet doesn't have a ProcessedFlag column at all, add one at the end (blank)
+        if (-not $colProcessed) {
+            $out['ProcessedFlag'] = ''
+        }
+
         [pscustomobject]$out
     }
 }
 
-# --- Display and export ---
+# ---------------------- Write XLSX ----------------------
+$outPath = "\\autobot\fdrive\ishd\ExpectedFiles_$($TargetDate.ToString('yyyyMMdd')).xlsx"
+
+function Write-Xlsx {
+    param([object[]]$Data, [string]$Path)
+
+    if (Get-Module -ListAvailable -Name ImportExcel) {
+        # Export-Excel keeps property order of the first object (we used [ordered])
+        $Data | Export-Excel -Path $Path -WorksheetName 'Expected' -AutoSize -FreezeTopRow -BoldTopRow -ClearSheet
+        return
+    }
+
+    # COM fallback
+    $excel = New-Object -ComObject Excel.Application
+    $excel.Visible = $false
+    try {
+        $wb = $excel.Workbooks.Add()
+        $ws = $wb.Worksheets.Item(1)
+        $ws.Name = 'Expected'
+
+        if (-not $Data -or $Data.Count -eq 0) {
+            $wb.SaveAs($Path, 51)  # 51 = xlOpenXMLWorkbook (.xlsx)
+            return
+        }
+
+        # Headers (in the order of the first object's properties)
+        $props = $Data[0].PSObject.Properties.Name
+        for ($c=0; $c -lt $props.Count; $c++) {
+            $ws.Cells.Item(1, $c+1).Value2 = $props[$c]
+            $ws.Cells.Item(1, $c+1).Font.Bold = $true
+        }
+
+        # Data
+        for ($r=0; $r -lt $Data.Count; $r++) {
+            $rowObj = $Data[$r]
+            for ($c=0; $c -lt $props.Count; $c++) {
+                $val = $rowObj.PSObject.Properties[$props[$c]].Value
+                $ws.Cells.Item($r+2, $c+1).Value2 = $val
+            }
+        }
+
+        $ws.UsedRange.Columns.AutoFit() | Out-Null
+        $wb.SaveAs($Path, 51)  # .xlsx
+    }
+    finally {
+        if ($wb) { $wb.Close($true) | Out-Null }
+        $excel.Quit() | Out-Null
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($excel)
+    }
+}
+
+Write-Xlsx -Data $expected -Path $outPath
+
+# Also show a quick table in the console for confirmation
 $expected | Format-Table -AutoSize
-$expected | Export-Csv -NoTypeInformation -Encoding UTF8 -Path "\\autobot\fdrive\ishd\ExpectedFiles_$($TargetDate.ToString('yyyyMMdd')).csv"
+
+Write-Host "Wrote $outPath"
