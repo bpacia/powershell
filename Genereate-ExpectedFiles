@@ -3,13 +3,11 @@ param(
     [string]  $ExcelPath  = '\\autobot\fdrive\ishd\IS File List.xlsx'
 )
 
-#--- Helper: read Excel first sheet into objects (uses ImportExcel if present, else COM) ---
+# --- Read Excel (ImportExcel if available; else COM) ---
 function Read-ExcelRows {
     param([string]$Path)
-
     if (Get-Module -ListAvailable -Name ImportExcel) {
-        Import-Excel -Path $Path -Worksheet 1
-        return
+        return Import-Excel -Path $Path -Worksheet 1
     }
 
     $excel = New-Object -ComObject Excel.Application
@@ -17,187 +15,112 @@ function Read-ExcelRows {
     try {
         $wb = $excel.Workbooks.Open($Path)
         $ws = $wb.Worksheets.Item(1)
-        $rng = $ws.UsedRange
-        $values = $rng.Value2
-
+        $values = $ws.UsedRange.Value2
         if (-not $values) { return @() }
-        $rows = @()
-        $headers = @()
-        for ($c=1; $c -le $values.GetLength(1); $c++) {
-            $h = [string]$values[1,$c]
-            $headers += $h
-        }
+
+        $rows=@(); $headers=@()
+        for ($c=1; $c -le $values.GetLength(1); $c++) { $headers += [string]$values[1,$c] }
         for ($r=2; $r -le $values.GetLength(0); $r++) {
-            $obj = [ordered]@{}
-            for ($c=1; $c -le $headers.Count; $c++) {
-                $obj[$headers[$c-1]] = $values[$r,$c]
-            }
-            # skip blank rows
-            if ($obj.Values -ne $null -and ($obj.Values -join '') -ne '') {
-                $rows += [pscustomobject]$obj
-            }
+            $o=[ordered]@{}
+            for ($c=1; $c -le $headers.Count; $c++) { $o[$headers[$c-1]] = $values[$r,$c] }
+            if ($o.Values -ne $null -and ($o.Values -join '') -ne '') { $rows += [pscustomobject]$o }
         }
         $rows
     }
     finally {
         if ($wb) { $wb.Close($false) | Out-Null }
         $excel.Quit() | Out-Null
-        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
+        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($excel)
     }
 }
 
-#--- Load rows from Excel ---
-if (-not (Test-Path $ExcelPath)) {
-    throw "Excel file not found: $ExcelPath"
-}
+if (-not (Test-Path $ExcelPath)) { throw "Excel file not found: $ExcelPath" }
 $rows = Read-ExcelRows -Path $ExcelPath
-if (-not $rows -or $rows.Count -eq 0) {
-    Write-Warning "No rows found in first worksheet."
-    return
-}
+if (-not $rows) { Write-Warning "No rows found."; return }
 
-#--- Header resolution (forgiving) ---
-function Normalize-Header([string]$s) {
-    if ($null -eq $s) { return '' }
-    return ($s -replace '[^a-z0-9]', '').ToLower()
-}
-
-# Build normalized->actual map from first row's properties
+# --- Header resolution (forgiving) ---
+function Normalize-Header([string]$s){ ($s -replace '[^a-z0-9]','').ToLower() }
 $first = $rows | Select-Object -First 1
-$propNames = $first.PSObject.Properties.Name
-$normToActual = @{}
-foreach ($p in $propNames) {
-    $n = Normalize-Header $p
-    if (-not $normToActual.ContainsKey($n)) { $normToActual[$n] = $p }
+$normToActual=@{}
+foreach($p in $first.PSObject.Properties.Name){
+    $n=Normalize-Header $p
+    if(-not $normToActual.ContainsKey($n)){ $normToActual[$n]=$p }
+}
+function ResolveCol([string[]]$cand){
+    foreach($c in $cand){ $nc=Normalize-Header $c; if($normToActual.ContainsKey($nc)){ return $normToActual[$nc] } }
+    $null
 }
 
-function ResolveCol([string[]]$candidates) {
-    foreach ($c in $candidates) {
-        $nc = Normalize-Header $c
-        if ($normToActual.ContainsKey($nc)) { return $normToActual[$nc] }
-    }
-    return $null
-}
-
-# Core columns (with tolerant candidates)
 $colFileName = ResolveCol @('FileName','File Name','ExpectedFile','Expected File Name','SourceFileName','Source File Name')
 $colFreq     = ResolveCol @('ExpectedFrequency','Frequency','Freq','Schedule','Cadence')
 $colDay      = ResolveCol @('ExpectedDay','Day','DoW','Weekday','Week Day')
 $colTime     = ResolveCol @('ExpectedTime','Time','ETA','DueTime','Due Time','TargetTime','Target Time')
-$colDataClass= ResolveCol @('DataClass','Data Class','Category')
-$colFileType = ResolveCol @('FileType','Type','Format')
 
-# Accessor safe for column names with spaces
-function Get-ColVal($row, [string]$colName) {
-    if ([string]::IsNullOrWhiteSpace($colName)) { return $null }
-    $p = $row.PSObject.Properties[$colName]
-    if ($p) { return $p.Value }
-    return $null
+function Get-ColVal($row,[string]$colName){
+    if([string]::IsNullOrWhiteSpace($colName)){ return $null }
+    $prop = $row.PSObject.Properties[$colName]
+    if($prop){ return $prop.Value }
+    $null
 }
 
-#--- Matching helpers ---
-function Normalize-DayToken([string]$s) {
-    if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+# --- Day token normalization ---
+# Treat these as "All": all, *, any, undetermined, unknown, tbd, na/n/a (any spacing/case).
+function Normalize-DayToken([string]$s){
+    if([string]::IsNullOrWhiteSpace($s)){ return $null }      # blank stays null
     $t = $s.Trim()
-    if ($t -match '^(all|\*|daily)$') { return 'All' }
-    # Take first three letters for Mon/Tue/etc.
-    $abbr = ($t.Substring(0,[Math]::Min(3,$t.Length))).ToLower()
-    switch ($abbr) {
-        'mon' { return 'Mon' }
-        'tue' { return 'Tue' }
-        'wed' { return 'Wed' }
-        'thu' { return 'Thu' }
-        'fri' { return 'Fri' }
-        'sat' { return 'Sat' }
-        'sun' { return 'Sun' }
-        default { return $t } # fallback (e.g., numeric day for monthly)
+    if ($t -match '^(all|\*|any|undetermined|unknown|tbd|n/?a)$') { return 'All' }
+
+    switch (($t.Substring(0,[Math]::Min(3,$t.Length))).ToLower()){
+        'mon'{'Mon'} 'tue'{'Tue'} 'wed'{'Wed'} 'thu'{'Thu'} 'fri'{'Fri'} 'sat'{'Sat'} 'sun'{'Sun'}
+        default { $t }  # e.g., numeric day for monthly
     }
 }
 
-function Should-Include($row, [datetime]$date) {
-    $freqRaw = [string](Get-ColVal $row $colFreq)
-    $dayRaw  = [string](Get-ColVal $row $colDay)
+# --- Include logic (now: 'All' applies to ANY frequency) ---
+function Should-Include($row,[datetime]$date){
+    $freq = ([string](Get-ColVal $row $colFreq)).Trim().ToLower()
+    $dayRaw = [string](Get-ColVal $row $colDay)
+    $token  = Normalize-DayToken $dayRaw
 
-    $freq = ($freqRaw | Out-String).Trim().ToLower()
+    # If token is 'All' (includes 'Undetermined', 'TBD', etc.), include regardless of frequency
+    if ($token -eq 'All') { return $true }
 
-    switch ($freq) {
-        'daily' {
-            $d = Normalize-DayToken $dayRaw
-            return ($d -eq 'All' -or [string]::IsNullOrWhiteSpace($d))
-        }
-        'weekly' {
-            $d = Normalize-DayToken $dayRaw
-            return ($d -eq $date.ToString('ddd'))
-        }
+    switch($freq){
+        'daily'   { return [string]::IsNullOrWhiteSpace($token) }                # blank/empty day → include
+        'weekly'  { return $token -eq $date.ToString('ddd') }
         'monthly' {
-            $n = 0
-            # Accept "01", "1", etc.
-            if ([int]::TryParse(($dayRaw -as [string]), [ref]$n)) {
-                return ($n -gt 0 -and $n -eq $date.Day)
-            }
-            return $false
+            $n=0
+            if([int]::TryParse($dayRaw,[ref]$n)){ return ($n -gt 0 -and $n -eq $date.Day) }
+            $false
         }
-        default {
-            # If frequency missing/unknown, be conservative: exclude
-            return $false
-        }
+        default   { $false }
     }
 }
 
-# Format ExpectedTime regardless of Excel typing (number/string/blank)
-function Format-Time($val) {
+# --- Time formatting (keeps original header name) ---
+function Format-Time($val){
     if ($null -eq $val -or $val -eq '') { return '' }
-    if ($val -is [double]) {
-        # Excel serial time (fraction of 1 day)
-        return ([datetime]'1899-12-30').AddDays($val).ToString('HH:mm')
-    }
-    # Try parse common string times
-    try {
-        return (Get-Date -Date $val).ToString('HH:mm')
-    } catch {
-        return [string]$val
-    }
+    if ($val -is [double]) { return ([datetime]'1899-12-30').AddDays($val).ToString('HH:mm') }
+    try { (Get-Date -Date $val).ToString('HH:mm') } catch { [string]$val }
 }
 
-# Replace placeholders in FileName
-function Resolve-FileName([string]$fn, [datetime]$d) {
-    if ([string]::IsNullOrWhiteSpace($fn)) { return $fn }
-    $fn = $fn -replace 'yyyyMMddhhmmss', $d.ToString('yyyyMMddHHmmss')
-    $fn = $fn -replace 'yyyyMMdd',        $d.ToString('yyyyMMdd')
-    $fn = $fn -replace 'yyyy-MM-dd',      $d.ToString('yyyy-MM-dd')
-    return $fn
-}
-
-#--- Build expected list (include ALL original columns + computed fields) ---
-$expected = foreach ($r in $rows) {
-    $origFileName = [string](Get-ColVal $r $colFileName)
-    if (-not $origFileName) { continue }
-
-    if (Should-Include $r $TargetDate) {
-        $resolved = Resolve-FileName $origFileName $TargetDate
-
-        # Start with computed fields
-        $out = [ordered]@{
-            Date              = $TargetDate.ToString('yyyy-MM-dd')
-            ResolvedFileName  = $resolved
+# --- Build expected list (Date + all original headers; time normalized in-place; no ResolvedFileName) ---
+$expected = foreach($r in $rows){
+    if(-not (Get-ColVal $r $colFileName)){ continue }
+    if(Should-Include $r $TargetDate){
+        $out=[ordered]@{ Date = $TargetDate.ToString('yyyy-MM-dd') }
+        foreach($p in $r.PSObject.Properties){
+            if ($p.Name -eq 'ResolvedFileName') { continue }  # never include
+            if ($colTime -and $p.Name -eq $colTime) {
+                $out[$p.Name] = Format-Time (Get-ColVal $r $colTime)
+            } else {
+                $out[$p.Name] = $p.Value
+            }
         }
-
-        # Append ALL original columns in their original order
-        foreach ($p in $r.PSObject.Properties) {
-            $out[$p.Name] = $p.Value
-        }
-
-        # Optionally, normalize a friendly Time column (doesn't overwrite original)
-        if ($colTime) {
-            $out['Time'] = Format-Time (Get-ColVal $r $colTime)
-        }
-
         [pscustomobject]$out
     }
 }
 
-# Output to screen (sorted by resolved name if present)
-$expected | Sort-Object ResolvedFileName | Format-Table -AutoSize
-
-# Optional CSV export (keep everything)
-# $expected | Export-Csv -NoTypeInformation -Path "\\autobot\fdrive\ishd\ExpectedFiles_$($TargetDate.ToString('yyyyMMdd')).csv"
+# --- Display and export ---
+$expected | Format-Table -AutoSize
+$expected | Export-Csv -NoTypeInformation -Encoding UTF8 -Path "\\autobot\fdrive\ishd\ExpectedFiles_$($TargetDate.ToString('yyyyMMdd')).csv"
