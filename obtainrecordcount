@@ -6,13 +6,13 @@ Calculates a GRAND TOTAL record count across all .dat files
 # -----------------------------
 # Easy-to-update variables
 # -----------------------------
-$RootFolder       = "\\faprod\edrive\archive\cab1020\adventisthealth\"
-$OutputFolder     = "\\faprod\gdrive\automate\stage\Bruce - Research"
-$FileFilter       = "*.dat"
+$RootFolder       = "%tv_path_archive%"
+$OutputFolder     = "%tv_path_archive%"
+$FileFilter       = "%tv_fn_payload%"
 $HeaderStartsWith = "ClientMaster"
 
 # Output file
-$Timestamp  = Get-Date -Format "yyyyMMdd_HHmmss"
+$Timestamp  = (Get-Date).AddDays(-1).ToString("yyyyMMdd")
 $OutputFile = Join-Path $OutputFolder "dat_grand_total_$Timestamp.txt"
 
 # -----------------------------
@@ -72,7 +72,6 @@ ForEach-Object {
 Root Folder     : $RootFolder
 Files Processed : $FilesProcessed
 Grand Total Records (No Headers): $GrandTotal
-Generated       : $(Get-Date)
 "@ | Out-File -FilePath $OutputFile -Encoding UTF8
 
 Write-Host "Completed."
