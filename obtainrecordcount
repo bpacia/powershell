@@ -1,0 +1,92 @@
+<#
+Reads all .dat files in a folder (and subfolders) and outputs a report:
+- Total lines
+- HeaderFound (line starts with "ClientMaster")
+- RecordCountExcludingHeader (TotalLines minus 1 if header found)
+#>
+
+# -----------------------------
+# Easy-to-update variables
+# -----------------------------
+$RootFolder      = "\\faprod\edrive\archive\cab1020\adventisthealth\"
+$OutputFolder    = "\\faprod\gdrive\automate\stage\Bruce - Research"
+$FileFilter      = "*.dat"
+$HeaderStartsWith = "ClientMaster"
+
+# Output file name
+$Timestamp   = Get-Date -Format "yyyyMMdd_HHmmss"
+$OutputFile  = Join-Path $OutputFolder "dat_record_counts_$Timestamp.csv"
+
+# -----------------------------
+# Safety checks
+# -----------------------------
+if (-not (Test-Path -Path $RootFolder)) {
+    throw "RootFolder not found: $RootFolder"
+}
+
+if (-not (Test-Path -Path $OutputFolder)) {
+    New-Item -Path $OutputFolder -ItemType Directory -Force | Out-Null
+}
+
+# -----------------------------
+# Main
+# -----------------------------
+$results = Get-ChildItem -Path $RootFolder -Recurse -File -Filter $FileFilter -ErrorAction Stop |
+ForEach-Object {
+    $file = $_.FullName
+
+    try {
+        # Count all lines efficiently
+        $totalLines = 0
+        $reader = [System.IO.File]::OpenText($file)
+        try {
+            while ($null -ne $reader.ReadLine()) { $totalLines++ }
+        } finally {
+            $reader.Close()
+        }
+
+        # Check first non-null line for header (fast + avoids reading file twice)
+        $firstLine = $null
+        $reader2 = [System.IO.File]::OpenText($file)
+        try {
+            $firstLine = $reader2.ReadLine()
+        } finally {
+            $reader2.Close()
+        }
+
+        $headerFound = $false
+        if ($firstLine -and $firstLine.StartsWith($HeaderStartsWith)) {
+            $headerFound = $true
+        }
+
+        $recordCount = $totalLines - (if ($headerFound) { 1 } else { 0 })
+        if ($recordCount -lt 0) { $recordCount = 0 }
+
+        [pscustomobject]@{
+            FileName                  = $_.Name
+            FullPath                  = $file
+            TotalLines                = $totalLines
+            HeaderFound               = $headerFound
+            RecordCountExcludingHeader = $recordCount
+            FileSizeBytes             = $_.Length
+            LastWriteTime             = $_.LastWriteTime
+        }
+    }
+    catch {
+        [pscustomobject]@{
+            FileName                  = $_.Name
+            FullPath                  = $file
+            TotalLines                = $null
+            HeaderFound               = $null
+            RecordCountExcludingHeader = $null
+            FileSizeBytes             = $_.Length
+            LastWriteTime             = $_.LastWriteTime
+            Error                     = $_.Exception.Message
+        }
+    }
+}
+
+# Export report
+$results | Sort-Object FullPath | Export-Csv -Path $OutputFile -NoTypeInformation -Encoding UTF8
+
+Write-Host "Done. Report written to: $OutputFile"
