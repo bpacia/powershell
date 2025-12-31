@@ -1,0 +1,59 @@
+<# 
+    AB1020 Grand Total Record Counter
+    - Recursively scans ZIP files
+    - Counts total file records across all ZIPs
+    - Outputs a single TXT file
+#>
+
+# ===== CONFIG =====
+$RootPath = "\\faprod\edrive\archive\cab1020\adventisthealth"
+$OutDir   = "\\faprod\edrive\archive\cab1020\adventisthealth"
+$FileDate = (Get-Date).AddDays(-1).ToString("yyyyMMdd")   # T-1
+$OutFile  = Join-Path $OutDir "ab1020_grand_total_$FileDate.txt"
+# ==================
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+if (-not (Test-Path $RootPath)) {
+    throw "Path not found: $RootPath"
+}
+
+$zipFiles = Get-ChildItem -Path $RootPath -Filter *.zip -File -Recurse
+
+$grandTotal = 0
+$failedZips = 0
+
+foreach ($zip in $zipFiles) {
+    $archive = $null
+    try {
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+
+        $fileCount = (
+            $archive.Entries |
+            Where-Object { $_.FullName -and -not $_.FullName.EndsWith('/') }
+        ).Count
+
+        $grandTotal += $fileCount
+    }
+    catch {
+        # Skip bad ZIPs but track count
+        $failedZips++
+    }
+    finally {
+        if ($archive) { $archive.Dispose() }
+    }
+}
+
+# Output format (simple, Automate-friendly)
+@"
+AB1020 ZIP GRAND TOTAL
+Run Date      : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+Target Folder : $RootPath
+ZIP Files     : $($zipFiles.Count)
+Failed ZIPs   : $failedZips
+---------------------------------
+GRAND TOTAL RECORDS : $grandTotal
+"@ | Out-File -FilePath $OutFile -Encoding UTF8
+
+Write-Host "Grand total file created:"
+Write-Host $OutFile
