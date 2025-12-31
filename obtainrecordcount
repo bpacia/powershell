@@ -69,7 +69,7 @@ ForEach-Object {
 # Output (single value)
 # -----------------------------
 @"
-Root Folder     : $RootFolder
+Folder     : $RootFolder
 Files Processed : $FilesProcessed
 Grand Total Records (No Headers): $GrandTotal
 "@ | Out-File -FilePath $OutputFile -Encoding UTF8
