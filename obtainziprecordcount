@@ -6,8 +6,8 @@
 #>
 
 # ===== CONFIG =====
-$RootPath = "\\faprod\edrive\archive\cab1020\adventisthealth"
-$OutDir   = "\\faprod\edrive\archive\cab1020\adventisthealth"
+$RootPath = "%tv_path_archive%"
+$OutDir   = "%tv_path_archive%"
 $FileDate = (Get-Date).AddDays(-1).ToString("yyyyMMdd")   # T-1
 $OutFile  = Join-Path $OutDir "ab1020_grand_total_$FileDate.txt"
 # ==================
@@ -46,13 +46,10 @@ foreach ($zip in $zipFiles) {
 
 # Output format (simple, Automate-friendly)
 @"
-AB1020 ZIP GRAND TOTAL
-Run Date      : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-Target Folder : $RootPath
+Folder : $RootPath
 ZIP Files     : $($zipFiles.Count)
 Failed ZIPs   : $failedZips
----------------------------------
-GRAND TOTAL RECORDS : $grandTotal
+Grand Total Records : $grandTotal
 "@ | Out-File -FilePath $OutFile -Encoding UTF8
 
 Write-Host "Grand total file created:"
