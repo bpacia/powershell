@@ -1,92 +1,80 @@
 <#
-Reads all .dat files in a folder (and subfolders) and outputs a report:
-- Total lines
-- HeaderFound (line starts with "ClientMaster")
-- RecordCountExcludingHeader (TotalLines minus 1 if header found)
+Calculates a GRAND TOTAL record count across all .dat files
+(subtracting header rows that start with "ClientMaster")
 #>
 
 # -----------------------------
 # Easy-to-update variables
 # -----------------------------
-$RootFolder      = "\\faprod\edrive\archive\cab1020\adventisthealth\"
-$OutputFolder    = "\\faprod\gdrive\automate\stage\Bruce - Research"
-$FileFilter      = "*.dat"
+$RootFolder       = "\\faprod\edrive\archive\cab1020\adventisthealth\"
+$OutputFolder     = "\\faprod\gdrive\automate\stage\Bruce - Research"
+$FileFilter       = "*.dat"
 $HeaderStartsWith = "ClientMaster"
 
-# Output file name
-$Timestamp   = Get-Date -Format "yyyyMMdd_HHmmss"
-$OutputFile  = Join-Path $OutputFolder "dat_record_counts_$Timestamp.csv"
+# Output file
+$Timestamp  = Get-Date -Format "yyyyMMdd_HHmmss"
+$OutputFile = Join-Path $OutputFolder "dat_grand_total_$Timestamp.txt"
 
 # -----------------------------
 # Safety checks
 # -----------------------------
-if (-not (Test-Path -Path $RootFolder)) {
-    throw "RootFolder not found: $RootFolder"
+if (-not (Test-Path $RootFolder)) {
+    throw "Root folder not found: $RootFolder"
 }
 
-if (-not (Test-Path -Path $OutputFolder)) {
+if (-not (Test-Path $OutputFolder)) {
     New-Item -Path $OutputFolder -ItemType Directory -Force | Out-Null
 }
 
 # -----------------------------
-# Main
+# Main logic
 # -----------------------------
-$results = Get-ChildItem -Path $RootFolder -Recurse -File -Filter $FileFilter -ErrorAction Stop |
+$GrandTotal = 0
+$FilesProcessed = 0
+
+Get-ChildItem -Path $RootFolder -Recurse -File -Filter $FileFilter -ErrorAction Stop |
 ForEach-Object {
+
+    $FilesProcessed++
+
     $file = $_.FullName
+    $lineCount = 0
 
+    # Efficient line count
+    $reader = [System.IO.File]::OpenText($file)
     try {
-        # Count all lines efficiently
-        $totalLines = 0
-        $reader = [System.IO.File]::OpenText($file)
-        try {
-            while ($null -ne $reader.ReadLine()) { $totalLines++ }
-        } finally {
-            $reader.Close()
-        }
-
-        # Check first non-null line for header (fast + avoids reading file twice)
-        $firstLine = $null
-        $reader2 = [System.IO.File]::OpenText($file)
-        try {
-            $firstLine = $reader2.ReadLine()
-        } finally {
-            $reader2.Close()
-        }
-
-        $headerFound = $false
-        if ($firstLine -and $firstLine.StartsWith($HeaderStartsWith)) {
-            $headerFound = $true
-        }
-
-        $recordCount = $totalLines - (if ($headerFound) { 1 } else { 0 })
-        if ($recordCount -lt 0) { $recordCount = 0 }
-
-        [pscustomobject]@{
-            FileName                  = $_.Name
-            FullPath                  = $file
-            TotalLines                = $totalLines
-            HeaderFound               = $headerFound
-            RecordCountExcludingHeader = $recordCount
-            FileSizeBytes             = $_.Length
-            LastWriteTime             = $_.LastWriteTime
+        while ($null -ne $reader.ReadLine()) {
+            $lineCount++
         }
     }
-    catch {
-        [pscustomobject]@{
-            FileName                  = $_.Name
-            FullPath                  = $file
-            TotalLines                = $null
-            HeaderFound               = $null
-            RecordCountExcludingHeader = $null
-            FileSizeBytes             = $_.Length
-            LastWriteTime             = $_.LastWriteTime
-            Error                     = $_.Exception.Message
-        }
+    finally {
+        $reader.Close()
     }
+
+    # Check header
+    $headerFound = $false
+    $firstLine = [System.IO.File]::ReadLines($file) | Select-Object -First 1
+    if ($firstLine -and $firstLine.StartsWith($HeaderStartsWith)) {
+        $headerFound = $true
+    }
+
+    if ($headerFound -and $lineCount -gt 0) {
+        $lineCount--
+    }
+
+    $GrandTotal += $lineCount
 }
 
-# Export report
-$results | Sort-Object FullPath | Export-Csv -Path $OutputFile -NoTypeInformation -Encoding UTF8
+# -----------------------------
+# Output (single value)
+# -----------------------------
+@"
+Root Folder     : $RootFolder
+Files Processed : $FilesProcessed
+Grand Total Records (No Headers): $GrandTotal
+Generated       : $(Get-Date)
+"@ | Out-File -FilePath $OutputFile -Encoding UTF8
 
-Write-Host "Done. Report written to: $OutputFile"
+Write-Host "Completed."
+Write-Host "Grand Total Records: $GrandTotal"
+Write-Host "Output file: $OutputFile"
